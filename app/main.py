@@ -6,7 +6,7 @@ import os
 import logging
 from dotenv import load_dotenv
 
-from app.jira import get_issue_details, get_jira_client, JiraClientError
+from app.jira_client import get_issue_details, get_jira_client, JiraClientError
 from app.utils import extract_jira_key_from_branch
 
 # Configure logging
