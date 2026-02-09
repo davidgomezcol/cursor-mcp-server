@@ -48,28 +48,42 @@ def format_issue_for_context(issue_key: str, issue_details: Dict[str, Any]) -> D
         A formatted dictionary for the context API
     """
     # Create a markdown-formatted content with key details
-    content_md = f"""
-    # {issue_key}: {issue_details.get('summary', 'No summary')}
+    content_md = f"""# {issue_key}: {issue_details.get('summary', 'No summary')}
 
-    **Type:** {issue_details.get('issuetype', 'Unknown')}  
-    **Status:** {issue_details.get('status', 'Unknown')}  
-    **Priority:** {issue_details.get('priority', 'Not set')}  
-    **Assignee:** {issue_details.get('assignee', 'Unassigned')}
+**Type:** {issue_details.get('issuetype', 'Unknown')}  
+**Status:** {issue_details.get('status', 'Unknown')}  
+**Priority:** {issue_details.get('priority', 'Not set')}  
+**Assignee:** {issue_details.get('assignee', 'Unassigned')}
 
-    ## Description
-    {issue_details.get('description', 'No description provided')}
+## Description
+{issue_details.get('description', 'No description provided')}
 
-    """
+"""
+    
+    # Add reproduction steps if available
+    reproduction_steps = issue_details.get('reproduction_steps')
+    if reproduction_steps:
+        content_md += f"## Reproduction Steps\n{reproduction_steps}\n\n"
     
     # Add components if available
     components = issue_details.get('components', [])
     if components:
-        content_md += f"\n**Components:** {', '.join(components)}\n"
+        content_md += f"**Components:** {', '.join(components)}\n"
     
     # Add labels if available
     labels = issue_details.get('labels', [])
     if labels:
-        content_md += f"\n**Labels:** {', '.join(labels)}\n"
+        content_md += f"**Labels:** {', '.join(labels)}\n"
+    
+    # Add comments if available
+    comments = issue_details.get('comments', [])
+    if comments:
+        content_md += "\n## Comments\n\n"
+        for comment in comments:
+            author = comment.get('author', 'Unknown')
+            created = comment.get('created', '')
+            body = comment.get('body', '')
+            content_md += f"**{author}** ({created}):\n{body}\n\n---\n\n"
     
     # Add link to Jira
     content_md += f"\n[View in Jira]({issue_details.get('url', '')})\n"
@@ -84,6 +98,8 @@ def format_issue_for_context(issue_key: str, issue_details: Dict[str, Any]) -> D
             "priority": issue_details.get('priority', 'Unknown'),
             "assignee": issue_details.get('assignee', 'Unassigned'),
             "issuetype": issue_details.get('issuetype', 'Unknown'),
-            "url": issue_details.get('url', '')
+            "url": issue_details.get('url', ''),
+            "has_reproduction_steps": reproduction_steps is not None,
+            "comment_count": len(comments),
         }
     }

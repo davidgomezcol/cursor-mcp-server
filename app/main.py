@@ -1,121 +1,158 @@
-from fastapi import FastAPI, HTTPException, Request, Depends
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
-import os
 import logging
+import sys
+from mcp.server.fastmcp import FastMCP
 from dotenv import load_dotenv
 
-from app.jira_client import get_issue_details, get_jira_client, JiraClientError
+from app.jira_client import (
+    get_issue_details,
+    get_issue_comments,
+    get_jira_client,
+    JiraClientError,
+)
 from app.utils import extract_jira_key_from_branch
 
-# Configure logging
+# Configure logging to stderr (stdout is used by MCP protocol)
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.WARNING,  # Reduce noise, only warnings and errors
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stderr
 )
 logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
 
-app = FastAPI(
-    title="Cursor MCP Server for Jira",
-    description="Custom MCP server to inject Jira issue summaries into Cursor's context API",
-    version="0.1.0",
-    docs_url="/docs",
-    redoc_url="/redoc"
-)
+# Create MCP server
+mcp = FastMCP("jira")
 
-# Configure CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # In production, specify your origins
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
-class ContextRequest(BaseModel):
-    branch: Optional[str] = None
-    files: Optional[List[str]] = None
+@mcp.tool()
+def get_jira_issue(issue_key: str) -> dict:
+    """
+    Get details for a Jira issue by its key.
     
-class ContextResponse(BaseModel):
-    context: List[Dict[str, Any]]
-
-@app.get("/")
-async def root():
-    return {"message": "Cursor MCP Server for Jira is running"}
-
-@app.get("/context", response_model=ContextResponse)
-async def get_context_get():
-    """Handle GET requests to the context endpoint"""
-    logger.info("Received GET request to /context")
-    return {"context": []}
-
-@app.post("/context", response_model=ContextResponse)
-async def get_context(request: ContextRequest):
-    context_items = []
-    
-    # Process branch information if provided
-    if request.branch:
-        logger.info(f"Processing branch: {request.branch}")
-        jira_key = extract_jira_key_from_branch(request.branch)
+    Args:
+        issue_key: The Jira issue key (e.g., 'PROJ-123')
         
-        if jira_key:
-            logger.info(f"Found Jira key: {jira_key}")
-            try:
-                issue_details = get_issue_details(jira_key)
-                if issue_details:
-                    context_items.append({
-                        "type": "jira_issue",
-                        "title": f"{jira_key}: {issue_details.get('summary', 'No summary')}",
-                        "content": issue_details.get('description', 'No description'),
-                        "metadata": {
-                            "issue_key": jira_key,
-                            "status": issue_details.get('status', 'Unknown'),
-                            "priority": issue_details.get('priority', 'Unknown'),
-                            "assignee": issue_details.get('assignee', 'Unassigned'),
-                            "url": issue_details.get('url', '')
-                        }
-                    })
-                    logger.info(f"Added context for issue {jira_key}")
-                else:
-                    logger.warning(f"No details found for issue {jira_key}")
-            except JiraClientError as e:
-                logger.error(f"Jira client error: {str(e)}")
-            except Exception as e:
-                logger.error(f"Error fetching Jira details: {str(e)}")
-    else:
-        logger.info("No branch information provided in request")
+    Returns:
+        Issue details including summary, description, status, priority,
+        assignee, reproduction steps, and recent comments.
+    """
+    try:
+        logger.info(f"Fetching Jira issue: {issue_key}")
+        issue_details = get_issue_details(issue_key)
+        
+        if not issue_details:
+            return {"error": f"Issue {issue_key} not found"}
+        
+        return {
+            "issue_key": issue_key,
+            "summary": issue_details.get("summary"),
+            "description": issue_details.get("description"),
+            "status": issue_details.get("status"),
+            "priority": issue_details.get("priority"),
+            "assignee": issue_details.get("assignee"),
+            "issuetype": issue_details.get("issuetype"),
+            "created": issue_details.get("created"),
+            "updated": issue_details.get("updated"),
+            "url": issue_details.get("url"),
+            "components": issue_details.get("components", []),
+            "labels": issue_details.get("labels", []),
+            "reproduction_steps": issue_details.get("reproduction_steps"),
+            "comments": issue_details.get("comments", []),
+        }
+    except JiraClientError as e:
+        logger.error(f"Jira client error: {str(e)}")
+        return {"error": str(e)}
+    except Exception as e:
+        logger.error(f"Error fetching Jira issue: {str(e)}")
+        return {"error": f"Unexpected error: {str(e)}"}
+
+
+@mcp.tool()
+def get_jira_issue_from_branch(branch_name: str) -> dict:
+    """
+    Extract Jira issue key from a git branch name and fetch its details.
     
-    return {"context": context_items}
+    Supports common branch naming formats:
+    - feature/PROJ-123-description
+    - bugfix/PROJ-123_fix_something
+    - PROJ-123-short-description
+    - hotfix/PROJ-123
+    
+    Args:
+        branch_name: The git branch name
+        
+    Returns:
+        Issue details if a Jira key is found in the branch name,
+        otherwise an error message.
+    """
+    jira_key = extract_jira_key_from_branch(branch_name)
+    
+    if not jira_key:
+        return {"error": f"No Jira issue key found in branch name: {branch_name}"}
+    
+    logger.info(f"Extracted Jira key {jira_key} from branch {branch_name}")
+    return get_jira_issue(jira_key)
 
-@app.get("/health")
-async def health_check():
-    return {"status": "healthy"}
 
-@app.get("/test-jira-connection")
-async def test_jira_connection():
-    """Test the connection to Jira API"""
+@mcp.tool()
+def get_jira_comments(issue_key: str, max_comments: int = 10) -> dict:
+    """
+    Get comments for a Jira issue.
+    
+    Args:
+        issue_key: The Jira issue key (e.g., 'PROJ-123')
+        max_comments: Maximum number of comments to retrieve (default 10)
+        
+    Returns:
+        List of comments with author, body, and timestamps.
+    """
+    try:
+        logger.info(f"Fetching comments for issue: {issue_key}")
+        comments = get_issue_comments(issue_key, max_comments)
+        
+        return {
+            "issue_key": issue_key,
+            "comment_count": len(comments),
+            "comments": comments,
+        }
+    except JiraClientError as e:
+        logger.error(f"Jira client error: {str(e)}")
+        return {"error": str(e)}
+    except Exception as e:
+        logger.error(f"Error fetching comments: {str(e)}")
+        return {"error": f"Unexpected error: {str(e)}"}
+
+
+@mcp.tool()
+def test_jira_connection() -> dict:
+    """
+    Test the connection to the Jira API.
+    
+    Returns:
+        Connection status and authenticated user details.
+    """
     try:
         jira = get_jira_client()
         myself = jira.myself()
         return {
-            "status": "success", 
+            "status": "success",
             "connected_as": myself["displayName"],
             "email": myself["emailAddress"],
-            "server": os.getenv("JIRA_SERVER")
         }
     except JiraClientError as e:
         logger.error(f"Jira connection test failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Jira connection error: {str(e)}")
+        return {"status": "error", "error": str(e)}
     except Exception as e:
         logger.error(f"Unexpected error testing Jira connection: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+        return {"status": "error", "error": f"Unexpected error: {str(e)}"}
+
+
+def main():
+    """Run the MCP server."""
+    mcp.run()
+
 
 if __name__ == "__main__":
-    import uvicorn
-    port = int(os.getenv("PORT", "3000"))
-    logger.info(f"Starting server on port {port}")
-    uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=True)
+    main()
